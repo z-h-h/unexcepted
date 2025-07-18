@@ -1,0 +1,107 @@
+{
+    "Graph": "/home/jlq/repo/1.5k-2k/restbed/build/call-graph/20250317-124806/cg",
+    "Result": [
+        {
+            "Context": 1,
+            "Thrown": 8,
+            "Caught": 8,
+            "Rate": "1.00"
+        },
+        {
+            "Context": 3,
+            "Thrown": 0,
+            "Caught": 0,
+            "Rate": "-"
+        },
+        {
+            "Context": 5,
+            "Thrown": 0,
+            "Caught": 0,
+            "Rate": "-"
+        },
+        {
+            "Context": 7,
+            "Thrown": 8,
+            "Caught": 8,
+            "Rate": "1.00"
+        },
+        {
+            "Context": 9,
+            "Thrown": 8,
+            "Caught": 8,
+            "Rate": "1.00"
+        },
+        {
+            "Context": 11,
+            "Thrown": 0,
+            "Caught": 0,
+            "Rate": "-"
+        },
+        {
+            "Context": 13,
+            "Thrown": 0,
+            "Caught": 0,
+            "Rate": "-"
+        },
+        {
+            "Context": 15,
+            "Thrown": 8,
+            "Caught": 8,
+            "Rate": "1.00"
+        },
+        {
+            "Context": 17,
+            "Thrown": 8,
+            "Caught": 8,
+            "Rate": "1.00"
+        },
+        {
+            "Context": 19,
+            "Thrown": 0,
+            "Caught": 0,
+            "Rate": "-"
+        },
+        {
+            "Context": 21,
+            "Thrown": 1,
+            "Caught": 0,
+            "Rate": "0.00"
+        },
+        {
+            "Context": 23,
+            "Thrown": 18,
+            "Caught": 8,
+            "Rate": "0.44"
+        },
+        {
+            "Context": 25,
+            "Thrown": 86,
+            "Caught": 8,
+            "Rate": "0.09"
+        },
+        {
+            "Context": 27,
+            "Thrown": 2,
+            "Caught": 0,
+            "Rate": "0.00"
+        },
+        {
+            "Context": 29,
+            "Thrown": 25,
+            "Caught": 0,
+            "Rate": "0.00"
+        },
+        {
+            "Context": 31,
+            "Thrown": 61,
+            "Caught": 8,
+            "Rate": "0.13"
+        },
+        {
+            "Context": 33,
+            "Thrown": 346,
+            "Caught": 10,
+            "Rate": "0.03"
+        }
+    ]
+}

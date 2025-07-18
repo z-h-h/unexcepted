@@ -1,0 +1,107 @@
+{
+    "Graph": "/home/zhh/projects/1.5k-2k/widelands/99/build/call-graph/20250410-171251/cg",
+    "Result": [
+        {
+            "Context": 1,
+            "Thrown": 16280,
+            "Caught": 10257,
+            "Rate": "0.63"
+        },
+        {
+            "Context": 3,
+            "Thrown": 3113,
+            "Caught": 1369,
+            "Rate": "0.44"
+        },
+        {
+            "Context": 5,
+            "Thrown": 12043,
+            "Caught": 7445,
+            "Rate": "0.62"
+        },
+        {
+            "Context": 7,
+            "Thrown": 7479,
+            "Caught": 3427,
+            "Rate": "0.46"
+        },
+        {
+            "Context": 9,
+            "Thrown": 32646,
+            "Caught": 10742,
+            "Rate": "0.33"
+        },
+        {
+            "Context": 11,
+            "Thrown": 23740,
+            "Caught": 6956,
+            "Rate": "0.29"
+        },
+        {
+            "Context": 13,
+            "Thrown": 28320,
+            "Caught": 8780,
+            "Rate": "0.31"
+        },
+        {
+            "Context": 15,
+            "Thrown": 31743,
+            "Caught": 8978,
+            "Rate": "0.28"
+        },
+        {
+            "Context": 17,
+            "Thrown": 126807,
+            "Caught": 10841,
+            "Rate": "0.09"
+        },
+        {
+            "Context": 19,
+            "Thrown": 6821,
+            "Caught": 1860,
+            "Rate": "0.27"
+        },
+        {
+            "Context": 21,
+            "Thrown": 16964,
+            "Caught": 8026,
+            "Rate": "0.47"
+        },
+        {
+            "Context": 23,
+            "Thrown": 30035,
+            "Caught": 4064,
+            "Rate": "0.14"
+        },
+        {
+            "Context": 25,
+            "Thrown": 218539,
+            "Caught": 11010,
+            "Rate": "0.05"
+        },
+        {
+            "Context": 27,
+            "Thrown": 135267,
+            "Caught": 9376,
+            "Rate": "0.07"
+        },
+        {
+            "Context": 29,
+            "Thrown": 215362,
+            "Caught": 10271,
+            "Rate": "0.05"
+        },
+        {
+            "Context": 31,
+            "Thrown": 370531,
+            "Caught": 10773,
+            "Rate": "0.03"
+        },
+        {
+            "Context": 33,
+            "Thrown": 556542,
+            "Caught": 11124,
+            "Rate": "0.02"
+        }
+    ]
+}

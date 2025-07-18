@@ -1,0 +1,107 @@
+{
+    "Graph": "/home/zhh/projects/1.5k-2k/kicad-source-mirror/121/build/call-graph/20250410-211759/cg",
+    "Result": [
+        {
+            "Context": 1,
+            "Thrown": 31600,
+            "Caught": 14771,
+            "Rate": "0.47"
+        },
+        {
+            "Context": 3,
+            "Thrown": 9421,
+            "Caught": 3488,
+            "Rate": "0.37"
+        },
+        {
+            "Context": 5,
+            "Thrown": 21388,
+            "Caught": 8267,
+            "Rate": "0.39"
+        },
+        {
+            "Context": 7,
+            "Thrown": 22480,
+            "Caught": 6400,
+            "Rate": "0.28"
+        },
+        {
+            "Context": 9,
+            "Thrown": 108448,
+            "Caught": 12480,
+            "Rate": "0.12"
+        },
+        {
+            "Context": 11,
+            "Thrown": 13537,
+            "Caught": 4173,
+            "Rate": "0.31"
+        },
+        {
+            "Context": 13,
+            "Thrown": 36706,
+            "Caught": 10301,
+            "Rate": "0.28"
+        },
+        {
+            "Context": 15,
+            "Thrown": 37004,
+            "Caught": 8046,
+            "Rate": "0.22"
+        },
+        {
+            "Context": 17,
+            "Thrown": 678164,
+            "Caught": 13791,
+            "Rate": "0.02"
+        },
+        {
+            "Context": 19,
+            "Thrown": 25377,
+            "Caught": 5715,
+            "Rate": "0.23"
+        },
+        {
+            "Context": 21,
+            "Thrown": 41913,
+            "Caught": 10564,
+            "Rate": "0.25"
+        },
+        {
+            "Context": 23,
+            "Thrown": 127457,
+            "Caught": 10221,
+            "Rate": "0.08"
+        },
+        {
+            "Context": 25,
+            "Thrown": 788233,
+            "Caught": 14282,
+            "Rate": "0.02"
+        },
+        {
+            "Context": 27,
+            "Thrown": 335256,
+            "Caught": 9687,
+            "Rate": "0.03"
+        },
+        {
+            "Context": 29,
+            "Thrown": 620644,
+            "Caught": 13049,
+            "Rate": "0.02"
+        },
+        {
+            "Context": 31,
+            "Thrown": 1080428,
+            "Caught": 13865,
+            "Rate": "0.01"
+        },
+        {
+            "Context": 33,
+            "Thrown": 4529931,
+            "Caught": 15271,
+            "Rate": "0.00"
+        }
+    ]
+}

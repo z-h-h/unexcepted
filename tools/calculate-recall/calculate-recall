@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+
+import json
+
+from pathlib import Path
+
+
+def checked_contexts(context):
+    if context == 1:
+        return [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    elif context == 2:
+        return [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    elif context == 3:
+        return [5, 7, 9, 11, 13, 15, 17]
+    elif context == 4:
+        return [5, 8, 9, 12, 13, 16, 17]
+    elif context == 5:
+        return [9, 13, 17]
+    elif context == 6:
+        return [7, 8, 9, 14, 15, 16, 17]
+    elif context == 7:
+        return [9, 15, 17]
+    elif context == 8:
+        return [9, 16, 17]
+    elif context == 9:
+        return [17]
+    elif context == 10:
+        return [11, 12, 13, 14, 15, 16, 17]
+    elif context == 11:
+        return [13, 15, 17]
+    elif context == 12:
+        return [13, 16, 17]
+    elif context == 13:
+        return [17]
+    elif context == 14:
+        return [15, 16, 17]
+    elif context == 15:
+        return [17]
+    elif context == 16:
+        return [17]
+    elif context == 17:
+        return []
+    else:
+        assert False
+
+
+TOTAL_CONTEXT_NUM = 17
+
+
+class Meta:
+    def __init__(self):
+        self.repo = 0  # total repo
+        self.repo_ = 0  # analyzed repo
+        self.commit = 0  # total commit
+        self.commit_ = 0  # analyzed commit
+        self.fix = 0  # analyzed fix
+        self.noexcept = 0
+
+    def dump(self):
+        print(f'repo: {self.repo_}/{self.repo}')
+        print(f'commit: {self.commit_}/{self.commit}')
+        print(f'fix: {self.fix} (noexcept: {self.noexcept})')
+
+
+def should_ignore(c_no, f_no):
+    TOOLS = [
+        # noexcept: 17 tools (out of 22)：
+        '103:1',
+        '54:1',
+        '54:2',
+        '55:1',
+        '56:1',
+        '57:1',
+        '57:2',
+        '58:1',
+        '59:1',
+        '60:1',
+        '169:1',
+        '169:2',
+        '169:3',
+        '256:1',
+        '256:2',
+        '256:3',
+        '256:4',
+        # main: 6 tools (out of 8)：
+        '253:1',
+        '254:1',
+        '254:2',
+        '304:1',
+        '410:1',
+        '410:2'
+    ]
+    for t in TOOLS:
+        t = t.split(':')
+        if int(c_no) == int(t[0]) and int(f_no) == int(t[1]):
+            return True
+    return False
+
+
+def stat_file(reviewed_file, c2f, ex_c2f, meta):
+    P = {}
+    # average precision is used
+    P[1] = 0.82
+    P[2] = 0.7
+    P[3] = 0.73
+    P[4] = 0.6
+    P[5] = 0.44
+    P[6] = 0.53
+    P[7] = 0.54
+    P[8] = 0.43
+    P[9] = 0.26
+    P[10] = 0.42
+    P[11] = 0.47
+    P[12] = 0.26
+    P[13] = 0.11
+    P[14] = 0.16
+    P[15] = 0.14
+    P[16] = 0.07
+    P[17] = 0.03
+    reviewed = json.loads(Path(reviewed_file).read_text())
+    for repo in reviewed:
+        # Begin: Adjust contexts from old [1,33] to new [1,17]
+        for commit in repo['commits']:
+            fix_no = 1
+            while f'fix_{fix_no}' in commit:
+                fix = commit[f'fix_{fix_no}']
+                fix_no += 1
+                contexts = set()
+                for context in fix['Context']:
+                    if context > 1:
+                        if context % 2 == 0:
+                            context = context + 1  # merge
+                        context = (context + 1) / 2  # remap
+                    contexts.add(int(context))
+                adjust_contexts = contexts.copy()
+                for context in contexts:
+                    for checked in checked_contexts(context):
+                        adjust_contexts.discard(checked)
+                fix['Context'] = list(adjust_contexts)
+        # Finish: Adjust contexts from old [1,33] to new [1,17]
+        analyzed_repo = False
+        for commit in repo['commits']:
+            fix_no = 1
+            commit_has_fix = False
+            while f'fix_{fix_no}' in commit:
+                fix = commit[f'fix_{fix_no}']
+                ignore = should_ignore(commit['no'], fix_no)
+                fix_no += 1
+                if ignore:
+                    continue
+                meta.fix += 1
+                commit_has_fix = True
+                if fix['Caller']['is noexcept']:
+                    meta.noexcept += 1
+                expanded_contexts = set()
+                contexts = fix['Context']
+                ex_c2f[max(contexts, key=lambda c: P[c])] += 1
+                for context in contexts:
+                    expanded_contexts.add(context)
+                    expanded_contexts.update(checked_contexts(context))
+                for context in expanded_contexts:
+                    c2f[context] += 1
+            meta.commit += 1
+            if commit_has_fix:
+                meta.commit_ += 1
+                analyzed_repo = True
+        meta.repo += 1
+        if analyzed_repo:
+            meta.repo_ += 1
+
+
+def stat(file):
+    meta = Meta()
+    c2f = {}
+    ex_c2f = {}
+    for context in range(1, TOTAL_CONTEXT_NUM + 1):
+        c2f[context] = ex_c2f[context] = 0
+    stat_file(file, c2f, ex_c2f, meta)
+    for ctx in range(1, TOTAL_CONTEXT_NUM + 1):
+        rate = round(100.0 * c2f[ctx] / meta.fix)
+        ex_rate = round(100.0 * ex_c2f[ctx] / meta.fix)
+        print(f'{ctx}: {ex_c2f[ctx]} ({ex_rate}%)\t{c2f[ctx]} ({rate}%)')
+    print('--------')
+    meta.dump()
+
+
+if __name__ == '__main__':
+    file = '/absolute/path/to/analyzed-commits.json'
+    stat(file)

@@ -1,0 +1,107 @@
+{
+    "Graph": "/home/gk/repos/1k-1.5k/Soundux-copies/10/build/call-graph/20250409-162112/cg",
+    "Result": [
+        {
+            "Context": 1,
+            "Thrown": 12,
+            "Caught": 12,
+            "Rate": "1.00"
+        },
+        {
+            "Context": 3,
+            "Thrown": 8,
+            "Caught": 4,
+            "Rate": "0.50"
+        },
+        {
+            "Context": 5,
+            "Thrown": 8,
+            "Caught": 4,
+            "Rate": "0.50"
+        },
+        {
+            "Context": 7,
+            "Thrown": 20,
+            "Caught": 16,
+            "Rate": "0.80"
+        },
+        {
+            "Context": 9,
+            "Thrown": 21,
+            "Caught": 17,
+            "Rate": "0.81"
+        },
+        {
+            "Context": 11,
+            "Thrown": 8,
+            "Caught": 4,
+            "Rate": "0.50"
+        },
+        {
+            "Context": 13,
+            "Thrown": 8,
+            "Caught": 4,
+            "Rate": "0.50"
+        },
+        {
+            "Context": 15,
+            "Thrown": 20,
+            "Caught": 16,
+            "Rate": "0.80"
+        },
+        {
+            "Context": 17,
+            "Thrown": 21,
+            "Caught": 17,
+            "Rate": "0.81"
+        },
+        {
+            "Context": 19,
+            "Thrown": 9,
+            "Caught": 5,
+            "Rate": "0.56"
+        },
+        {
+            "Context": 21,
+            "Thrown": 9,
+            "Caught": 5,
+            "Rate": "0.56"
+        },
+        {
+            "Context": 23,
+            "Thrown": 21,
+            "Caught": 17,
+            "Rate": "0.81"
+        },
+        {
+            "Context": 25,
+            "Thrown": 21,
+            "Caught": 17,
+            "Rate": "0.81"
+        },
+        {
+            "Context": 27,
+            "Thrown": 133,
+            "Caught": 5,
+            "Rate": "0.04"
+        },
+        {
+            "Context": 29,
+            "Thrown": 141,
+            "Caught": 5,
+            "Rate": "0.04"
+        },
+        {
+            "Context": 31,
+            "Thrown": 168,
+            "Caught": 17,
+            "Rate": "0.10"
+        },
+        {
+            "Context": 33,
+            "Thrown": 934,
+            "Caught": 17,
+            "Rate": "0.02"
+        }
+    ]
+}

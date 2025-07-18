@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import sys
+
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='profile catch/throw for contexts')
+    parser.add_argument('graph', metavar='DIR', type=Path,
+                        help='path to the call graph directory')
+    parser.add_argument('-j', '--jobs', metavar='N', type=int, default=1,
+                        help=f'run with N jobs (default: 1)')
+    parser.add_argument('-o', '--output', metavar='FILE', type=Path, default=None,
+                        help=f'output to FILE (default: stdout)')
+    return parser.parse_args()
+
+
+class Exception:
+    @classmethod
+    def create_new(cls, name):
+        return cls(name + ' (新!)', None, None, None)
+
+    @classmethod
+    def from_json(cls, json_object):
+        name = json_object['USR']
+        loc = json_object['Loc']
+        parent_name_set = set(json_object['Parent'])
+        return cls(name, loc, parent_name_set)
+
+    def __init__(self, name, loc, parent_name_set):
+        self.name = name
+        self.loc = loc
+        self.parent_name_set = parent_name_set
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
+
+
+class CallSite:
+    @classmethod
+    def from_json(cls, json_object):
+        callee_name = json_object['USR']
+        callee_s_name = json_object['SName']
+        loc = json_object['Loc']
+        expand = json_object['Expand']
+        catch_set = set()
+        for ex in json_object['Catch']:
+            catch_set.add(Exception.from_json(ex))
+        return cls(callee_name, callee_s_name, loc, expand, catch_set)
+
+    def __init__(self, callee_name, callee_s_name, loc, expand, catch_set):
+        self.callee_name = callee_name
+        self.callee_s_name = callee_s_name
+        self.loc = loc
+        self.expand = expand
+        self.catch_set = catch_set
+        # Waiting for graph to complete
+        self.function = None
+        self.callee = None
+
+    def __eq__(self, other):
+        return self.callee_name == other.callee_name and self.loc == other.loc
+
+    def __hash__(self):
+        return hash((self.loc, self.function, self.callee_name))
+
+    def complete(self, function, graph):
+        self.function = function
+        self.callee = graph.get(self.callee_name, None)
+
+
+class Function:
+    @classmethod
+    def from_json(cls, json_object):
+        name = json_object['USR']
+        s_name = json_object['SName']
+        loc = json_object['Loc']
+        tag = json_object['Tag']
+        direct_throw_set = set()
+        for ex in json_object['DirectThrow']:
+            direct_throw_set.add(Exception.from_json(ex))
+        throw_set = set()
+        for ex in json_object['Throw']:
+            throw_set.add(Exception.from_json(ex))
+        call_site_set = set()
+        for cs in json_object['CallSite']:
+            call_site_set.add(CallSite.from_json(cs))
+        caller_name_set = set(json_object['Caller'])
+        return cls(name, s_name, loc, tag, direct_throw_set, throw_set, call_site_set, caller_name_set)
+
+    def __init__(self, name, s_name, loc, tag, direct_throw_set, throw_set, call_site_set, caller_name_set):
+        self.name = name
+        self.s_name = s_name
+        self.loc = loc
+        self.tag = tag
+        self.direct_throw_set = direct_throw_set
+        self.throw_set = throw_set
+        self.call_site_set = call_site_set
+        self.caller_name_set = caller_name_set
+        # Waiting for graph to complete
+        self.caller_set = set()
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def complete(self, graph):
+        for caller_name in self.caller_name_set:
+            assert caller_name in graph
+            self.caller_set.add(graph[caller_name])
+        for call_site in self.call_site_set:
+            call_site.complete(self, graph)
+
+
+class ContextProfiler:
+    def __init__(self, graph_dir, verbose=False):
+        graph_dir = Path(graph_dir)
+        if not graph_dir.is_dir():
+            print(f'No such directory: {graph_dir}')
+            sys.exit(1)
+        self.graph = {}
+        json_files = [f for f in graph_dir.glob('*.json')]
+        for (i, json_file) in enumerate(json_files, start=1):
+            graph_json = json.loads(json_file.read_bytes())
+            for function_dict in graph_json:
+                function = Function.from_json(function_dict)
+                self.graph[function.name] = function
+            if verbose:
+                print(f'[{i}/{len(json_files)}] "{json_file}"')
+        for fun in self.graph.values():
+            fun.complete(self.graph)
+        # 索引
+        self.callee_idx = {}
+        self.callee_name_idx = {}
+        self.callee_scope_idx = {}
+        self.caller_idx = {}
+        self.caller_name_idx = {}
+        self.caller_scope_idx = {}
+        self.total_call_site = set()
+        self.caught_call_site = set()
+        self.num_ex_caught = {}
+        self.build_index()
+
+    @staticmethod
+    def get_scope(s_name):
+        return s_name.rsplit('::', 1)[0] if '::' in s_name else ''
+
+    @staticmethod
+    def get_name(s_name):
+        return s_name.rsplit('::', 1)[1] if '::' in s_name else s_name
+
+    @staticmethod
+    def check_catch(call_site, throw_ex):
+        for catch_ex in call_site.catch_set:
+            if catch_ex.name == '...' or catch_ex == throw_ex:
+                return True
+            for parent_ex_name in throw_ex.parent_name_set:
+                if catch_ex.name == parent_ex_name:
+                    return True
+        return False
+
+    def build_index(self):
+        #   callee_idx          callee 所在的抛出异常的调用点
+        #   callee_name_idx     callee_name 所在的抛出异常的调用点
+        #   callee_scope_idx    callee_scope 所在的抛出异常的调用点
+        #   caller_idx          caller 包含的抛出异常的调用点
+        #   caller_name_idx     caller_name 包含的抛出异常的调用点
+        #   caller_scope_idx    caller_scope 包含的抛出异常的调用点
+        #
+        #   total_call_site     所有抛出异常的调用点
+        #   caught_call_site    所有被捕获的抛出异常的调用点
+        #   num_ex_caught       抛出异常的调用点所抛出的异常中被捕获的个数
+        print(f'Indexing...')
+        for fun in self.graph.values():
+            if 'S' in fun.tag:
+                continue
+            for call_site in fun.call_site_set:
+                if not call_site.callee:
+                    continue
+                if not call_site.callee.throw_set:
+                    continue
+
+                # 更新 callee 索引
+                tmp = self.callee_idx.get(call_site.callee, set())
+                tmp.add(call_site)
+                self.callee_idx[call_site.callee] = tmp
+                # 更新 callee_name 索引
+                callee_name = ContextProfiler.get_name(call_site.callee_s_name)
+                tmp = self.callee_name_idx.get(callee_name, set())
+                tmp.add(call_site)
+                self.callee_name_idx[callee_name] = tmp
+                # 更新 callee_scope 索引
+                callee_scope = ContextProfiler.get_scope(
+                    call_site.callee_s_name)
+                tmp = self.callee_scope_idx.get(callee_scope, set())
+                tmp.add(call_site)
+                self.callee_scope_idx[callee_scope] = tmp
+
+                # 更新 caller 索引
+                tmp = self.caller_idx.get(call_site.function, set())
+                tmp.add(call_site)
+                self.caller_idx[call_site.function] = tmp
+                # 更新 caller_name 索引
+                caller_name = ContextProfiler.get_name(
+                    call_site.function.s_name)
+                tmp = self.caller_name_idx.get(caller_name, set())
+                tmp.add(call_site)
+                self.caller_name_idx[caller_name] = tmp
+                # 更新 caller_scope 索引
+                caller_scope = ContextProfiler.get_scope(
+                    call_site.function.s_name)
+                tmp = self.caller_scope_idx.get(caller_scope, set())
+                tmp.add(call_site)
+                self.caller_scope_idx[caller_scope] = tmp
+
+                # 更新 total_call_site
+                self.total_call_site.add(call_site)
+                # 更新 caught_call_site 和 num_ex_caught
+                self.num_ex_caught[call_site] = 0
+                for throw_ex in call_site.callee.throw_set:
+                    if ContextProfiler.check_catch(call_site, throw_ex):
+                        self.caught_call_site.add(call_site)
+                        self.num_ex_caught[call_site] += 1
+
+    def profile_context_1(self):
+        num_thrown = 0
+        num_caught = 0
+        for fun in self.graph.values():
+            if 'S' in fun.tag:
+                continue
+            for call_site in fun.call_site_set:
+                if not call_site.callee:
+                    continue
+                # 抛出至少两种异常
+                if len(call_site.callee.throw_set) < 2:
+                    continue
+                # 且至少有一种异常被捕获
+                if call_site not in self.caught_call_site:
+                    continue
+                for throw_ex in call_site.callee.throw_set:
+                    # 每一个 throw_ex 都是一个 thrown
+                    num_thrown += 1
+                    if ContextProfiler.check_catch(call_site, throw_ex):
+                        # 每一个被捕获的 throw_ex 都是一个 caught
+                        num_caught += 1
+        return num_thrown, num_caught
+
+    def collect_call_site_set(self, context, call_site):
+        if context == 3:
+            # 当前 callee 在当前 caller 里的调用点
+            callee_call_site_set = self.callee_idx.get(call_site.callee, set())
+            caller_call_site_set = self.caller_idx.get(
+                call_site.function, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 5:
+            # 某个 callee 在当前 caller 里的调用点
+            callee_name = ContextProfiler.get_name(call_site.callee_s_name)
+            callee_call_site_set = self.callee_name_idx.get(callee_name, set())
+            caller_call_site_set = self.caller_idx.get(
+                call_site.function, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 7:
+            # 某个 S2 函数在当前 caller 里的调用点
+            callee_scope = ContextProfiler.get_scope(call_site.callee_s_name)
+            callee_call_site_set = self.callee_scope_idx.get(
+                callee_scope, set())
+            caller_call_site_set = self.caller_idx.get(
+                call_site.function, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 9:
+            # 某个函数在当前 caller 里的调用点
+            caller_call_site_set = self.caller_idx.get(
+                call_site.function, set())
+            return caller_call_site_set
+        if context == 11:
+            # 当前 callee 在某个 caller 里的调用点
+            callee_call_site_set = self.callee_idx.get(call_site.callee, set())
+            caller_name = ContextProfiler.get_name(call_site.function.s_name)
+            caller_call_site_set = self.caller_name_idx.get(caller_name, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 13:
+            # 某个 callee 在某个 caller 里的调用点
+            callee_name = ContextProfiler.get_name(call_site.callee_s_name)
+            callee_call_site_set = self.callee_name_idx.get(callee_name, set())
+            caller_name = ContextProfiler.get_name(call_site.function.s_name)
+            caller_call_site_set = self.caller_name_idx.get(caller_name, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 15:
+            # 某个 S2 函数在某个 caller 里的调用点
+            callee_scope = ContextProfiler.get_scope(call_site.callee_s_name)
+            callee_call_site_set = self.callee_scope_idx.get(
+                callee_scope, set())
+            caller_name = ContextProfiler.get_name(call_site.function.s_name)
+            caller_call_site_set = self.caller_name_idx.get(caller_name, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 17:
+            # 某个函数在某个 caller 里的调用点
+            caller_name = ContextProfiler.get_name(call_site.function.s_name)
+            caller_call_site_set = self.caller_name_idx.get(caller_name, set())
+            return caller_call_site_set
+        if context == 19:
+            # 当前 callee 在某个 S1 函数里的调用点
+            callee_call_site_set = self.callee_idx.get(call_site.callee, set())
+            caller_scope = ContextProfiler.get_scope(call_site.function.s_name)
+            caller_call_site_set = self.caller_scope_idx.get(
+                caller_scope, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 21:
+            # 某个 callee 在某个 S1 函数里的调用点
+            callee_name = ContextProfiler.get_name(call_site.callee_s_name)
+            callee_call_site_set = self.callee_name_idx.get(callee_name, set())
+            caller_scope = ContextProfiler.get_scope(call_site.function.s_name)
+            caller_call_site_set = self.caller_scope_idx.get(
+                caller_scope, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 23:
+            # 某个 S2 在某个 S1 函数里的调用点
+            callee_scope = ContextProfiler.get_scope(call_site.callee_s_name)
+            callee_call_site_set = self.callee_scope_idx.get(
+                callee_scope, set())
+            caller_scope = ContextProfiler.get_scope(call_site.function.s_name)
+            caller_call_site_set = self.caller_scope_idx.get(
+                caller_scope, set())
+            return callee_call_site_set & caller_call_site_set
+        if context == 25:
+            # 某个函数在某个 S1 函数里的调用点
+            caller_scope = ContextProfiler.get_scope(call_site.function.s_name)
+            caller_call_site_set = self.caller_scope_idx.get(
+                caller_scope, set())
+            return caller_call_site_set
+        if context == 27:
+            # 当前 callee 在某个函数里的调用点
+            callee_call_site_set = self.callee_idx.get(call_site.callee, set())
+            return callee_call_site_set
+        if context == 29:
+            # 某个 callee 在某个函数里的调用点
+            callee_name = ContextProfiler.get_name(call_site.callee_s_name)
+            callee_call_site_set = self.callee_name_idx.get(callee_name, set())
+            return callee_call_site_set
+        if context == 31:
+            # 某个 S2 函数在某个函数里的调用点
+            callee_scope = ContextProfiler.get_scope(call_site.callee_s_name)
+            callee_call_site_set = self.callee_scope_idx.get(
+                callee_scope, set())
+            return callee_call_site_set
+        if context == 33:
+            # 某个函数在某个函数里的调用点
+            return self.total_call_site
+        assert False
+
+    def profile(self, context):
+        if context == 1:
+            return self.profile_context_1()
+        num_thrown = 0
+        num_caught = 0
+        visited = set()
+        for call_site in self.total_call_site:
+            if call_site in visited:
+                continue
+            call_site_set = self.collect_call_site_set(context, call_site)
+            visited.update(call_site_set)
+            if len(call_site_set) < 2:
+                continue
+            caught_call_site_set = call_site_set & self.caught_call_site
+            if not len(caught_call_site_set):
+                continue
+            if len(caught_call_site_set) == 1:
+                call_site_set.remove(caught_call_site_set.pop())
+            for cs in call_site_set:
+                num_thrown += len(cs.callee.throw_set)
+                num_caught += self.num_ex_caught[cs]
+        return num_thrown, num_caught
+
+
+class JsonOutput:
+    def __init__(self, graph):
+        self.Graph = graph.resolve().as_posix()
+        self.Result = []
+
+    def add(self, context, thrown, caught):
+        rate = '%.2f' % (caught / thrown) if thrown else '-'
+        self.Result.append({
+            'Context': context,
+            'Thrown': thrown,
+            'Caught': caught,
+            'Rate': rate
+        })
+
+    def dump(self, output):
+        self.Result.sort(key=lambda c: c['Context'])
+        text = json.dumps(self.__dict__, indent=4)
+        output.write_text(text) if output else print(text)
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    if args.output and args.output.exists():
+        print(f'{args.output} already exists')
+        sys.exit(1)
+    profiler = ContextProfiler(args.graph, verbose=True)
+    def job(ctx): return ctx, *profiler.profile(ctx)
+    contexts = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33]
+    json_output = JsonOutput(args.graph)
+    with ProcessPoolExecutor(args.jobs) as e:
+        futures = [e.submit(job, ctx) for ctx in contexts]
+        for future in as_completed(futures):
+            json_output.add(*future.result())
+    json_output.dump(args.output)

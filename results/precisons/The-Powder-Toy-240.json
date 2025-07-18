@@ -1,0 +1,107 @@
+{
+    "Graph": "/home/gk/repos/3k-5k/The-Powder-Toy-copies/240/call-graph/20250424-210812/cg",
+    "Result": [
+        {
+            "Context": 1,
+            "Thrown": 618,
+            "Caught": 545,
+            "Rate": "0.88"
+        },
+        {
+            "Context": 3,
+            "Thrown": 478,
+            "Caught": 433,
+            "Rate": "0.91"
+        },
+        {
+            "Context": 5,
+            "Thrown": 498,
+            "Caught": 453,
+            "Rate": "0.91"
+        },
+        {
+            "Context": 7,
+            "Thrown": 646,
+            "Caught": 568,
+            "Rate": "0.88"
+        },
+        {
+            "Context": 9,
+            "Thrown": 959,
+            "Caught": 650,
+            "Rate": "0.68"
+        },
+        {
+            "Context": 11,
+            "Thrown": 495,
+            "Caught": 438,
+            "Rate": "0.88"
+        },
+        {
+            "Context": 13,
+            "Thrown": 515,
+            "Caught": 458,
+            "Rate": "0.89"
+        },
+        {
+            "Context": 15,
+            "Thrown": 685,
+            "Caught": 571,
+            "Rate": "0.83"
+        },
+        {
+            "Context": 17,
+            "Thrown": 1108,
+            "Caught": 653,
+            "Rate": "0.59"
+        },
+        {
+            "Context": 19,
+            "Thrown": 953,
+            "Caught": 569,
+            "Rate": "0.60"
+        },
+        {
+            "Context": 21,
+            "Thrown": 961,
+            "Caught": 577,
+            "Rate": "0.60"
+        },
+        {
+            "Context": 23,
+            "Thrown": 1742,
+            "Caught": 636,
+            "Rate": "0.37"
+        },
+        {
+            "Context": 25,
+            "Thrown": 4574,
+            "Caught": 658,
+            "Rate": "0.14"
+        },
+        {
+            "Context": 27,
+            "Thrown": 2073,
+            "Caught": 592,
+            "Rate": "0.29"
+        },
+        {
+            "Context": 29,
+            "Thrown": 2162,
+            "Caught": 605,
+            "Rate": "0.28"
+        },
+        {
+            "Context": 31,
+            "Thrown": 4734,
+            "Caught": 655,
+            "Rate": "0.14"
+        },
+        {
+            "Context": 33,
+            "Thrown": 20244,
+            "Caught": 667,
+            "Rate": "0.03"
+        }
+    ]
+}

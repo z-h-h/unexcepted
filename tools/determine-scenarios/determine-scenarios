@@ -1,0 +1,1000 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import sys
+
+from pathlib import Path
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='check context')
+    parser.add_argument('graph', metavar='DIR', type=Path,
+                        help='path to the call graph directory')
+    parser.add_argument('fix', metavar='FILE', type=Path,
+                        help='path to the fix information file')
+    return parser.parse_args()
+
+
+class Exception:
+    @classmethod
+    def create_new(cls, name):
+        return cls(name + ' (新!)', None, None)
+    
+    @classmethod
+    def from_json(cls, json_object):
+        name = json_object['USR']
+        loc = json_object['Loc']
+        parent_name_set = set(json_object['Parent'])
+        return cls(name, loc, parent_name_set)
+
+    def __init__(self, name, loc, parent_name_set):
+        self.name = name
+        self.loc = loc
+        self.parent_name_set = parent_name_set
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
+
+
+class CallSite:
+    @classmethod
+    def from_json(cls, json_object):
+        callee_name = json_object['USR']
+        callee_s_name = json_object['SName']
+        loc = json_object['Loc']
+        expand = json_object['Expand']
+        catch_set = set()
+        for ex in json_object['Catch']:
+            catch_set.add(Exception.from_json(ex))
+        return cls(callee_name, callee_s_name, loc, expand, catch_set)
+
+    def __init__(self, callee_name, callee_s_name, loc, expand, catch_set):
+        self.callee_name = callee_name
+        self.callee_s_name = callee_s_name
+        self.loc = loc
+        self.expand = expand
+        self.catch_set = catch_set
+        # Waiting for graph to complete
+        self.function = None
+        self.callee = None
+
+    def __eq__(self, other):
+        return self.callee_name == other.callee_name and self.loc == other.loc
+
+    def __hash__(self):
+        return hash((self.loc, self.function, self.callee_name))
+
+    def complete(self, function, graph):
+        self.function = function
+        self.callee = graph.get(self.callee_name, None)
+
+
+class Function:
+    @classmethod
+    def from_json(cls, json_object):
+        name = json_object['USR']
+        s_name = json_object['SName']
+        loc = json_object['Loc']
+        tag = json_object['Tag']
+        direct_throw_set = set()
+        for ex in json_object['DirectThrow']:
+            direct_throw_set.add(Exception.from_json(ex))
+        throw_set = set()
+        for ex in json_object['Throw']:
+            throw_set.add(Exception.from_json(ex))
+        call_site_set = set()
+        for cs in json_object['CallSite']:
+            call_site_set.add(CallSite.from_json(cs))
+        caller_name_set = set(json_object['Caller'])
+        return cls(name, s_name, loc, tag, direct_throw_set, throw_set, call_site_set, caller_name_set)
+
+    def __init__(self, name, s_name, loc, tag, direct_throw_set, throw_set, call_site_set, caller_name_set):
+        self.name = name
+        self.s_name = s_name
+        self.loc = loc
+        self.tag = tag
+        self.direct_throw_set = direct_throw_set
+        self.throw_set = throw_set
+        self.call_site_set = call_site_set
+        self.caller_name_set = caller_name_set
+        # Waiting for graph to complete
+        self.caller_set = set()
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def complete(self, graph):
+        for caller_name in self.caller_name_set:
+            assert caller_name in graph
+            self.caller_set.add(graph[caller_name])
+        for call_site in self.call_site_set:
+            call_site.complete(self, graph)
+
+
+class CommitFixInfo:
+    def __init__(self, call_site, exception):
+        self.Info = {
+            'caller': call_site.function.s_name,
+            'loc': call_site.loc,
+            'callee': call_site.callee_s_name,
+            'exception': exception.name
+        }
+        self.Context = []
+        self.Caller = {
+            'is noexcept': 'N' in call_site.function.tag,
+            'has direct caller': bool(call_site.function.caller_set),
+            'has indirect caller': 'true/false'
+        }
+        indirect = call_site.callee_name == '<Indirect Call>'
+        self.Callee = {
+            'is indirect call': indirect,
+            'has virtual keyword': '-' if indirect else 'true/false',
+            'has direct throw': '-' if indirect else 'true/false'
+        }
+
+    def set_context(self, context):
+        self.Context = context
+
+    def to_str(self):
+        return json.dumps(self, indent=4, cls=CommitFixInfoEncoder)
+
+
+class CommitFixInfoEncoder(json.JSONEncoder):
+    def default(self, o):
+        return o.__dict__
+
+
+class Analyzer:
+    def __init__(self, graph_dir, verbose=False):
+        graph_dir = Path(graph_dir)
+        if not graph_dir.is_dir():
+            print(f'找不到文件夹: {graph_dir}')
+            sys.exit(1)
+        self.graph = {}
+        json_files = [f for f in graph_dir.glob('*.json')]
+        for (i, json_file) in enumerate(json_files, start=1):
+            graph_json = json.loads(json_file.read_bytes())
+            for function_dict in graph_json:
+                function = Function.from_json(function_dict)
+                self.graph[function.name] = function
+            if verbose:
+                print(f'[{i}/{len(json_files)}] "{json_file}"')
+        for fun in self.graph.values():
+            fun.complete(self.graph)
+
+    def find_call_site(self, loc):
+        for caller in self.graph.values():
+            for call_site in caller.call_site_set:
+                if call_site.loc == loc and not call_site.expand:
+                    return call_site
+        return None
+
+    def find_exception(self, exception_name):
+        names = exception_name.split('::')
+        for caller in self.graph.values():
+            for call_site in caller.call_site_set:
+                for catch_ex in call_site.catch_set:
+                    # 不精确的查找，但应该足够应付绝大多数情况
+                    if all(name in catch_ex.name for name in names):
+                        return catch_ex
+        return Exception.create_new(exception_name)
+
+
+    def prepare(self, loc, exception_name):
+        self.call_site = self.find_call_site(loc)
+        if not self.call_site:
+            print(f'找不到函数调用: {loc}')
+            sys.exit(1)
+        self.exception = self.find_exception(exception_name)
+        if self.exception in self.call_site.catch_set:
+            print(f'已存在异常捕获: {loc}')
+            sys.exit(1)
+        self.caller = self.call_site.function
+        self.scope_1 = self.get_scope(self.caller.s_name)
+        self.name_1 = self.get_name(self.caller.s_name)
+        if self.call_site.callee_name != '<Indirect Call>':
+            self.scope_2 = self.get_scope(self.call_site.callee_s_name)
+            self.name_2 = self.get_name(self.call_site.callee_s_name)
+        self.fix = CommitFixInfo(self.call_site, self.exception)
+        print(f'(当前 caller) 捕获 (loc) 位置的 (当前 callee)，通过 (E) 异常')
+        print(f'\t当前 caller: {self.caller.s_name}')
+        print(f'\tloc 位置: {self.call_site.loc}')
+        print(f'\t当前 callee: {self.call_site.callee_s_name}')
+        print(f'\tE 异常: {self.exception.name}')
+
+    def get_candidates(self):
+        if self.call_site.callee_name != '<Indirect Call>':
+            return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
+        else:
+            return [8, 9, 16, 17, 24, 25, 32, 33]
+
+    @staticmethod
+    def get_scope(s_name):
+        return s_name.rsplit('::', 1)[0] if '::' in s_name else ''
+
+    @staticmethod
+    def get_name(s_name):
+        return s_name.rsplit('::', 1)[1] if '::' in s_name else s_name
+
+    @staticmethod
+    def get_checked_contexts(context):
+        if context == 1:
+            return [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33]
+        elif context == 2:
+            return [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
+        elif context == 3:
+            return [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33]
+        elif context == 4:
+            return [5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29, 32, 33]
+        elif context == 5:
+            return [9, 13, 17, 21, 25, 29, 33]
+        elif context == 6:
+            return [7, 8, 9, 14, 15, 16, 17, 22, 23, 24, 25, 30, 31, 32, 33]
+        elif context == 7:
+            return [9, 15, 17, 23, 25, 31, 33]
+        elif context == 8:
+            return [9, 16, 17, 24, 25, 32, 33]
+        elif context == 9:
+            return [17, 25, 33]
+        elif context == 10:
+            return [11, 12, 13, 14, 15, 16, 17, 26, 27, 28, 29, 30, 31, 32, 33]
+        elif context == 11:
+            return [13, 15, 17, 27, 29, 31, 33]
+        elif context == 12:
+            return [13, 16, 17, 28, 29, 32, 33]
+        elif context == 13:
+            return [17, 29, 33]
+        elif context == 14:
+            return [15, 16, 17, 30, 31, 32, 33]
+        elif context == 15:
+            return [17, 31, 33]
+        elif context == 16:
+            return [17, 32, 33]
+        elif context == 17:
+            return [33]
+        elif context == 18:
+            return [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
+        elif context == 19:
+            return [21, 23, 25, 27, 29, 31, 33]
+        elif context == 20:
+            return [21, 24, 25, 28, 29, 32, 33]
+        elif context == 21:
+            return [25, 29, 33]
+        elif context == 22:
+            return [23, 24, 25, 30, 31, 32, 33]
+        elif context == 23:
+            return [25, 31, 33]
+        elif context == 24:
+            return [25, 32, 33]
+        elif context == 25:
+            return [33]
+        elif context == 26:
+            return [27, 28, 29, 30, 31, 32, 33]
+        elif context == 27:
+            return [29, 31, 33]
+        elif context == 28:
+            return [29, 32, 33]
+        elif context == 29:
+            return [33]
+        elif context == 30:
+            return [31, 32, 33]
+        elif context == 31:
+            return [33]
+        elif context == 32:
+            return [33]
+        elif context == 33:
+            return []
+        else:
+            print(f'不支持的上下文: {context}')
+            sys.exit(1)
+
+    def check_contexts(self):
+        candidates = self.get_candidates()
+        satisfied = []
+        while candidates:
+            candidate = candidates.pop(0)
+            if getattr(self, f'check_context_{candidate}')():
+                satisfied.append(candidate)
+                checked = Analyzer.get_checked_contexts(candidate)
+                candidates = [c for c in candidates if c not in checked]
+        self.fix.set_context(satisfied)
+        return self.fix
+
+    def is_current_callee(self, call_site):
+        return self.call_site.callee_name == call_site.callee_name
+
+    def is_certain_callee(self, call_site):
+        return self.name_2 == Analyzer.get_name(call_site.callee_s_name)
+
+    def is_certain_caller(self, caller):
+        return self.name_1 == Analyzer.get_name(caller.s_name)
+
+    def is_certain_S1(self, caller):
+        return self.scope_1 == Analyzer.get_scope(caller.s_name)
+
+    def is_certain_S2(self, call_site):
+        return self.scope_2 == Analyzer.get_scope(call_site.callee_s_name)
+
+    def is_exception_E(self, exception):
+        return self.exception == exception
+
+    def check_catch(self, call_site, exception):
+        # exception 要确实捕获 call_site 抛出的异常
+        if not call_site.callee:
+            # 找不到函数体时认为 call_site 可以抛出任何异常
+            return True
+        for throw_ex in call_site.callee.throw_set:
+            if exception.name == '...' or exception == throw_ex:
+                return True
+            for parent_ex_name in throw_ex.parent_name_set:
+                if exception.name == parent_ex_name:
+                    return True
+        return False
+
+    def check_context_1(self):
+        desc = '(1) (当前 caller) 已经捕获了 (loc) 位置的 (当前 callee)，通过 (某个) 异常'
+        call_site = self.call_site
+        # call_site 是 (当前 caller) 的 (loc) 位置的 (当前 callee)
+        for catch_ex in call_site.catch_set:
+            # catch_ex 是 (某个) 异常
+            if self.check_catch(call_site, catch_ex):
+                # 满足最终条件
+                print(desc)
+                print(f'\t某个异常: {catch_ex.name}')
+                return True
+        return False
+
+    def check_context_2(self):
+        desc = '(2) (当前 caller) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (E) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置
+            if self.is_current_callee(call_site):
+                # call_site 是 (当前 callee)
+                for catch_ex in call_site.catch_set:
+                    if self.is_exception_E(catch_ex):
+                        # catch_ex 是 (E) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个位置: {call_site.loc}')
+                            return True
+        return False
+
+    def check_context_3(self):
+        desc = '(3) (当前 caller) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (某个) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置
+            if self.is_current_callee(call_site):
+                # call_site 是 (当前 callee)
+                for catch_ex in call_site.catch_set:
+                    # catch_ex 是 (某个) 异常
+                    if self.check_catch(call_site, catch_ex):
+                        # 满足最终条件
+                        print(desc)
+                        print(f'\t某个位置: {call_site.loc}')
+                        print(f'\t某个异常: {catch_ex.name}')
+                        return True
+        return False
+
+    def check_context_4(self):
+        desc = '(4) (当前 caller) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (E) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置
+            if self.is_certain_callee(call_site):
+                # call_site 是 (某个 callee)
+                for catch_ex in call_site.catch_set:
+                    if self.is_exception_E(catch_ex):
+                        # catch_ex 是 (E) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个 callee: {call_site.callee_s_name}')
+                            return True
+        return False
+
+    def check_context_5(self):
+        desc = '(5) (当前 caller) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (某个) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置
+            if self.is_certain_callee(call_site):
+                # call_site 是 (某个 callee)
+                for catch_ex in call_site.catch_set:
+                    # catch_ex 是 (某个) 异常
+                    if self.check_catch(call_site, catch_ex):
+                        # 满足最终条件
+                        print(desc)
+                        print(f'\t某个位置: {call_site.loc}')
+                        print(f'\t某个 callee: {call_site.callee_s_name}')
+                        print(f'\t某个异常: {catch_ex.name}')
+                        return True
+        return False
+
+    def check_context_6(self):
+        desc = '(6) (当前 caller) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (E) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置
+            if self.is_certain_S2(call_site):
+                # call_site 是 (某个 S2 函数)
+                for catch_ex in call_site.catch_set:
+                    if self.is_exception_E(catch_ex):
+                        # catch_ex 是 (E) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个 S2 函数: {call_site.callee_s_name}')
+                            return True
+        return False
+
+    def check_context_7(self):
+        desc = '(7) (当前 caller) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (某个) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置
+            if self.is_certain_S2(call_site):
+                # call_site 是 (某个 S2 函数)
+                for catch_ex in call_site.catch_set:
+                    # catch_ex 是 (某个) 异常
+                    if self.check_catch(call_site, catch_ex):
+                        # 满足最终条件
+                        print(desc)
+                        print(f'\t某个位置: {call_site.loc}')
+                        print(f'\t某个 S2 函数: {call_site.callee_s_name}')
+                        print(f'\t某个异常: {catch_ex.name}')
+                        return True
+        return False
+
+    def check_context_8(self):
+        desc = '(8) (当前 caller) 已经捕获了 (某个) 位置的 (某个函数)，通过 (E) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置的 (某个函数)
+            for catch_ex in call_site.catch_set:
+                if self.is_exception_E(catch_ex):
+                    # catch_ex 是 (E) 异常
+                    if self.check_catch(call_site, catch_ex):
+                        # 满足最终条件
+                        print(desc)
+                        print(f'\t某个位置: {call_site.loc}')
+                        print(f'\t某个函数: {call_site.callee_s_name}')
+                        return True
+        return False
+
+    def check_context_9(self):
+        desc = '(9) (当前 caller) 已经捕获了 (某个) 位置的 (某个函数)，通过 (某个) 异常'
+        caller = self.caller
+        # caller 是 (当前 caller)
+        for call_site in caller.call_site_set:
+            # call_site 是 (某个) 位置的 (某个函数)
+            for catch_ex in call_site.catch_set:
+                # catch_ex 是 (某个) 异常
+                if self.check_catch(call_site, catch_ex):
+                    # 满足最终条件
+                    print(desc)
+                    print(f'\t某个位置: {call_site.loc}')
+                    print(f'\t某个函数: {call_site.callee_s_name}')
+                    print(f'\t某个异常: {catch_ex.name}')
+                    return True
+        return False
+
+    def check_context_10(self):
+        desc = '(10) (某个 caller) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_current_callee(call_site):
+                        # call_site 是 (当前 callee)
+                        for catch_ex in call_site.catch_set:
+                            if self.is_exception_E(catch_ex):
+                                # catch_ex 是 (E) 异常
+                                if self.check_catch(call_site, catch_ex):
+                                    # 满足最终条件
+                                    print(desc)
+                                    print(f'\t某个 caller: {caller.s_name}')
+                                    print(f'\t某个位置: {call_site.loc}')
+                                    return True
+        return False
+
+    def check_context_11(self):
+        desc = '(11) (某个 caller) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_current_callee(call_site):
+                        # call_site 是 (当前 callee)
+                        for catch_ex in call_site.catch_set:
+                            # catch_ex 是 (某个) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 caller: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(f'\t某个异常: {catch_ex.name}')
+                                return True
+        return False
+
+    def check_context_12(self):
+        desc = '(12) (某个 caller) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_callee(call_site):
+                        # call_site 是 (某个 callee)
+                        for catch_ex in call_site.catch_set:
+                            if self.is_exception_E(catch_ex):
+                                # catch_ex 是 (E) 异常
+                                if self.check_catch(call_site, catch_ex):
+                                    # 满足最终条件
+                                    print(desc)
+                                    print(f'\t某个 caller: {caller.s_name}')
+                                    print(f'\t某个位置: {call_site.loc}')
+                                    print(
+                                        f'\t某个 callee: {call_site.callee_s_name}')
+                                    return True
+        return False
+
+    def check_context_13(self):
+        desc = '(13) (某个 caller) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_callee(call_site):
+                        # call_site 是 (某个 callee)
+                        for catch_ex in call_site.catch_set:
+                            # catch_ex 是 (某个) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 caller: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(
+                                    f'\t某个 callee: {call_site.callee_s_name}')
+                                print(f'\t某个异常: {catch_ex.name}')
+                                return True
+        return False
+
+    def check_context_14(self):
+        desc = '(14) (某个 caller) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_S2(call_site):
+                        # call_site 是 (某个 S2 函数)
+                        for catch_ex in call_site.catch_set:
+                            if self.is_exception_E(catch_ex):
+                                # catch_ex 是 (E) 异常
+                                if self.check_catch(call_site, catch_ex):
+                                    # 满足最终条件
+                                    print(desc)
+                                    print(f'\t某个 caller: {caller.s_name}')
+                                    print(f'\t某个位置: {call_site.loc}')
+                                    print(
+                                        f'\t某个 S2 函数: {call_site.callee_s_name}')
+                                    return True
+        return False
+
+    def check_context_15(self):
+        desc = '(15) (某个 caller) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_S2(call_site):
+                        # call_site 是 (某个 S2 函数)
+                        for catch_ex in call_site.catch_set:
+                            # catch_ex 是 (某个) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 caller: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(f'\t某个 S2 函数: {call_site.callee_s_name}')
+                                print(f'\t某个异常: {catch_ex.name}')
+                                return True
+        return False
+
+    def check_context_16(self):
+        desc = '(16) (某个 caller) 已经捕获了 (某个) 位置的 (某个函数)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置的 (某个函数)
+                    for catch_ex in call_site.catch_set:
+                        if self.is_exception_E(catch_ex):
+                            # catch_ex 是 (E) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 caller: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(f'\t某个函数: {call_site.callee_s_name}')
+                                return True
+        return False
+
+    def check_context_17(self):
+        desc = '(17) (某个 caller) 已经捕获了 (某个) 位置的 (某个函数)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_caller(caller):
+                # caller 是 (某个 caller)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置的 (某个函数)
+                    for catch_ex in call_site.catch_set:
+                        # catch_ex 是 (某个) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个 caller: {caller.s_name}')
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个函数: {call_site.callee_s_name}')
+                            print(f'\t某个异常: {catch_ex.name}')
+                            return True
+        return False
+
+    def check_context_18(self):
+        desc = '(18) (某个 S1 函数) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_current_callee(call_site):
+                        # call_site 是 (当前 callee)
+                        for catch_ex in call_site.catch_set:
+                            if self.is_exception_E(catch_ex):
+                                # catch_ex 是 (E) 异常
+                                if self.check_catch(call_site, catch_ex):
+                                    # 满足最终条件
+                                    print(desc)
+                                    print(f'\t某个 S1 函数: {caller.s_name}')
+                                    print(f'\t某个位置: {call_site.loc}')
+                                    return True
+        return False
+
+    def check_context_19(self):
+        desc = '(19) (某个 S1 函数) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_current_callee(call_site):
+                        # call_site 是 (当前 callee)
+                        for catch_ex in call_site.catch_set:
+                            # catch_ex 是 (某个) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 S1 函数: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(f'\t某个异常: {catch_ex.name}')
+                                return True
+        return False
+
+    def check_context_20(self):
+        desc = '(20) (某个 S1 函数) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_callee(call_site):
+                        # call_site 是 (某个 callee)
+                        for catch_ex in call_site.catch_set:
+                            if self.is_exception_E(catch_ex):
+                                # catch_ex 是 (E) 异常
+                                if self.check_catch(call_site, catch_ex):
+                                    # 满足最终条件
+                                    print(desc)
+                                    print(f'\t某个 S1 函数: {caller.s_name}')
+                                    print(f'\t某个位置: {call_site.loc}')
+                                    print(
+                                        f'\t某个 callee: {call_site.callee_s_name}')
+                                    return True
+        return False
+
+    def check_context_21(self):
+        desc = '(21) (某个 S1 函数) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_callee(call_site):
+                        # call_site 是 (某个 callee)
+                        for catch_ex in call_site.catch_set:
+                            # catch_ex 是 (某个) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 S1 函数: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(
+                                    f'\t某个 callee: {call_site.callee_s_name}')
+                                print(f'\t某个异常: {catch_ex.name}')
+                                return True
+        return False
+
+    def check_context_22(self):
+        desc = '(22) (某个 S1 函数) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_S2(call_site):
+                        # call_site 是 (某个 S2 函数)
+                        for catch_ex in call_site.catch_set:
+                            if self.is_exception_E(catch_ex):
+                                # catch_ex 是 (E) 异常
+                                if self.check_catch(call_site, catch_ex):
+                                    # 满足最终条件
+                                    print(desc)
+                                    print(f'\t某个 S1 函数: {caller.s_name}')
+                                    print(f'\t某个位置: {call_site.loc}')
+                                    print(
+                                        f'\t某个 S2 函数: {call_site.callee_s_name}')
+                                    return True
+        return False
+
+    def check_context_23(self):
+        desc = '(23) (某个 S1 函数) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置
+                    if self.is_certain_S2(call_site):
+                        # call_site 是 (某个 S2 函数)
+                        for catch_ex in call_site.catch_set:
+                            # catch_ex 是 (某个) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 S1 函数: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(f'\t某个 S2 函数: {call_site.callee_s_name}')
+                                print(f'\t某个异常: {catch_ex.name}')
+                                return True
+        return False
+
+    def check_context_24(self):
+        desc = '(24) (某个 S1 函数) 已经捕获了 (某个) 位置的 (某个函数)，通过 (E) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置的 (某个函数)
+                    for catch_ex in call_site.catch_set:
+                        if self.is_exception_E(catch_ex):
+                            # catch_ex 是 (E) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个 S1 函数: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(f'\t某个函数: {call_site.callee_s_name}')
+                                return True
+        return False
+
+    def check_context_25(self):
+        desc = '(25) (某个 S1 函数) 已经捕获了 (某个) 位置的 (某个函数)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            if self.is_certain_S1(caller):
+                # caller 是 (某个 S1 函数)
+                for call_site in caller.call_site_set:
+                    # call_site 是 (某个) 位置的 (某个函数)
+                    for catch_ex in call_site.catch_set:
+                        # catch_ex 是 (某个) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个 S1 函数: {caller.s_name}')
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个函数: {call_site.callee_s_name}')
+                            print(f'\t某个异常: {catch_ex.name}')
+                            return True
+        return False
+
+    def check_context_26(self):
+        desc = '(26) (某个函数) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (E) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置
+                if self.is_current_callee(call_site):
+                    # call_site 是 (当前 callee)
+                    for catch_ex in call_site.catch_set:
+                        if self.is_exception_E(catch_ex):
+                            # catch_ex 是 (E) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个函数: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                return True
+        return False
+
+    def check_context_27(self):
+        desc = '(27) (某个函数) 已经捕获了 (某个) 位置的 (当前 callee)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置
+                if self.is_current_callee(call_site):
+                    # call_site 是 (当前 callee)
+                    for catch_ex in call_site.catch_set:
+                        # catch_ex 是 (某个) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个函数: {caller.s_name}')
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个异常: {catch_ex.name}')
+                            return True
+        return False
+
+    def check_context_28(self):
+        desc = '(28) (某个函数) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (E) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置
+                if self.is_certain_callee(call_site):
+                    # call_site 是 (某个 callee)
+                    for catch_ex in call_site.catch_set:
+                        if self.is_exception_E(catch_ex):
+                            # catch_ex 是 (E) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个函数: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(
+                                    f'\t某个 callee: {call_site.callee_s_name}')
+                                return True
+        return False
+
+    def check_context_29(self):
+        desc = '(29) (某个函数) 已经捕获了 (某个) 位置的 (某个 callee)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置
+                if self.is_certain_callee(call_site):
+                    # call_site 是 (某个 callee)
+                    for catch_ex in call_site.catch_set:
+                        # catch_ex 是 (某个) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个函数: {caller.s_name}')
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个 callee: {call_site.callee_s_name}')
+                            print(f'\t某个异常: {catch_ex.name}')
+                            return True
+        return False
+
+    def check_context_30(self):
+        desc = '(30) (某个函数) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (E) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置
+                if self.is_certain_S2(call_site):
+                    # call_site 是 (某个 S2 函数)
+                    for catch_ex in call_site.catch_set:
+                        if self.is_exception_E(catch_ex):
+                            # catch_ex 是 (E) 异常
+                            if self.check_catch(call_site, catch_ex):
+                                # 满足最终条件
+                                print(desc)
+                                print(f'\t某个函数: {caller.s_name}')
+                                print(f'\t某个位置: {call_site.loc}')
+                                print(f'\t某个 S2 函数: {call_site.callee_s_name}')
+                                return True
+        return False
+
+    def check_context_31(self):
+        desc = '(31) (某个函数) 已经捕获了 (某个) 位置的 (某个 S2 函数)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置
+                if self.is_certain_S2(call_site):
+                    # call_site 是 (某个 S2 函数)
+                    for catch_ex in call_site.catch_set:
+                        # catch_ex 是 (某个) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个函数: {caller.s_name}')
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个 S2 函数: {call_site.callee_s_name}')
+                            print(f'\t某个异常: {catch_ex.name}')
+                            return True
+        return False
+
+    def check_context_32(self):
+        desc = '(32) (某个函数) 已经捕获了 (某个) 位置的 (某个函数)，通过 (E) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置的 (某个函数)
+                for catch_ex in call_site.catch_set:
+                    if self.is_exception_E(catch_ex):
+                        # catch_ex 是 (E) 异常
+                        if self.check_catch(call_site, catch_ex):
+                            # 满足最终条件
+                            print(desc)
+                            print(f'\t某个函数: {caller.s_name}')
+                            print(f'\t某个位置: {call_site.loc}')
+                            print(f'\t某个函数: {call_site.callee_s_name}')
+                            return True
+        return False
+
+    def check_context_33(self):
+        desc = '(33) (某个函数) 已经捕获了 (某个) 位置的 (某个函数)，通过 (某个) 异常'
+        for caller in self.graph.values():
+            # caller 是 (某个函数)
+            for call_site in caller.call_site_set:
+                # call_site 是 (某个) 位置的 (某个函数)
+                for catch_ex in call_site.catch_set:
+                    # catch_ex 是 (某个) 异常
+                    if self.check_catch(call_site, catch_ex):
+                        # 满足最终条件
+                        print(desc)
+                        print(f'\t某个函数: {caller.s_name}')
+                        print(f'\t某个位置: {call_site.loc}')
+                        print(f'\t某个函数: {call_site.callee_s_name}')
+                        print(f'\t某个异常: {catch_ex.name}')
+                        return True
+        return False
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    if not args.fix.is_file():
+        print(f'找不到文件: {args.fix}')
+        sys.exit(1)
+    fix_list = json.loads(args.fix.read_text())
+    analyzer = Analyzer(args.graph, verbose=True)
+    fix_res = []
+    for no, fix_json in enumerate(fix_list, start=1):
+        print(f'#### FIX_{no} ####')
+        analyzer.prepare(fix_json['loc'], fix_json['exception'])
+        fix = analyzer.check_contexts()
+        fix_res.append(f'"fix_{no}": {fix.to_str()}')
+    print(',\n'.join(fix_res))

@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import time
+import copy
+import sys
+
+from subprocess import TimeoutExpired, CalledProcessError
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from io import StringIO
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='generate call graphs for source files in a compilation database')
+    parser.add_argument('cdb', metavar='FILE', type=Path,
+                        help='compilation database')
+    parser.add_argument('--no-system', action='store_true',
+                        help="do not include functions in system headers")
+    parser.add_argument('--no-expand', action='store_true',
+                        help="do not expand virtual function calls")
+    parser.add_argument('--no-strict', action='store_true',
+                        help="allow frontend errors")
+    parser.add_argument('-o', '--output', metavar='DIR', type=Path, default='call-graph',
+                        help=f'output to DIR (default: call-graph)')
+    parser.add_argument('-j', '--jobs', metavar='N', type=int, default=1,
+                        help=f'analyze with N jobs (default: 1)')
+    parser.add_argument('-t', '--timeout', metavar='SEC', type=int, default=60,
+                        help=f'timeout for each source file (default: 60)')
+    parser.add_argument('-c', '--clang', metavar='EXE', type=Path, default='clang-call-graph',
+                        help=f'clang-call-graph executable (default: clang-call-graph)')
+    return parser.parse_args()
+
+
+class Process:
+
+    class Stat:
+        timeout = 'timeout',
+        unknown = 'unknown',
+        error = 'error',
+        terminated = 'terminated',
+        ok = 'ok'
+
+    def __init__(self, cmd, timeout):
+        self.cmd = cmd
+        self.timeout = timeout
+        try:
+            proc = subprocess.run(
+                self.cmd, text=True, timeout=self.timeout, capture_output=True, check=True)
+            self.stat = Process.Stat.ok
+            self.stdout = proc.stdout
+            self.stderr = proc.stderr
+        except TimeoutExpired as e:
+            self.stat = Process.Stat.timeout
+            self.stderr = e.stderr
+            self.stdout = e.stdout
+        except CalledProcessError as e:
+            if e.returncode < 0:
+                self.stat = Process.Stat.terminated
+                self.signal = -e.returncode
+            elif e.returncode > 0:
+                self.stat = Process.Stat.error
+                self.code = e.returncode
+            self.stdout = e.stdout
+            self.stderr = e.stderr
+        except Exception as e:
+            self.stat = Process.Stat.unknown
+            self.exception = e
+            self.stderr = ''
+            self.stdout = ''
+
+    def dump_log(self):
+        msg = f'{" ".join(map(lambda c: str(c), self.cmd))}\n\n'
+        if self.stdout:
+            msg += f'STDOUT:\n{self.stdout}\n\n'
+        if self.stderr:
+            msg += f'STDERR:\n{self.stderr}\n\n'
+        if self.stat == Process.Stat.timeout:
+            msg += f'TIMEOUT: {self.timeout}'
+        elif self.stat == Process.Stat.unknown:
+            msg += str(self.exception)
+        elif self.stat == Process.Stat.error:
+            msg += f'EXIT CODE: {self.code}'
+        elif self.stat == Process.Stat.terminated:
+            sig = signal.strsignal(self.signal)
+            msg += f'TERMINATED BY SIGNAL: {self.signal} ({sig})'
+        return msg
+
+
+class Tracker:
+    def __init__(self):
+        self.data = {}
+        self.time = time.localtime(time.time())
+
+    def track(self, tag, total):
+        self.tag = tag
+        self.data[tag] = {}
+        self.data[tag]['total'] = total
+
+    def increase(self, k, v):
+        self.data[self.tag][k] = self.data[self.tag].get(k, 0) + v
+
+
+class ExceptionInfo:
+    def __init__(self, json_object):
+        self.USR = json_object['USR']
+        self.Loc = json_object['Loc']
+        self.Parent = json_object['Parent']
+
+    def __eq__(self, other):
+        return self.USR == other.USR
+
+    def __hash__(self):
+        return hash(self.USR)
+
+
+class CallSiteInfo:
+    def __init__(self, json_object):
+        self.USR = json_object['USR']
+        self.SName = json_object['SName']
+        self.Loc = json_object['Loc']
+        self.Expand = ''
+        self.Catch = set()
+        for catch in json_object['Catch']:
+            self.Catch.add(ExceptionInfo(catch))
+
+    def __eq__(self, other):
+        return self.USR == other.USR and self.Loc == other.Loc
+
+    def __hash__(self):
+        return hash(self.USR + self.Loc)
+
+
+class FunctionInfo:
+    def __init__(self, json_object):
+        self.USR = json_object['USR']
+        self.SName = json_object['SName']
+        self.Loc = json_object['Loc']
+        self.Tag = json_object['Tag']
+        self.DirectThrow = set()
+        for throw in json_object['DirectThrow']:
+            self.DirectThrow.add(ExceptionInfo(throw))
+        self.Throw = set(self.DirectThrow)
+        self.CallSite = set()
+        for call_site in json_object['CallSite']:
+            self.CallSite.add(CallSiteInfo(call_site))
+        self.Caller = set()
+
+    def __eq__(self, other):
+        return self.USR == other.USR
+
+    def __hash__(self):
+        return hash(self.USR)
+
+
+class FunctionInfoEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, set):
+            return list(o)
+        return o.__dict__
+
+
+class PolymorphInfo:
+    def __init__(self, json_object):
+        self.Name = json_object['Name']
+        self.SName = json_object['SName']
+        self.Derived = []
+
+    def add_derived(self, derived_poly_info):
+        for derived in self.Derived:
+            if derived['Name'] == derived_poly_info.Name:
+                return
+        self.Derived.append({
+            'Name': derived_poly_info.Name,
+            'SName': derived_poly_info.SName
+        })
+
+
+class PolymorphInfoEncoder(json.JSONEncoder):
+    def default(self, o):
+        return o.__dict__
+
+
+class CGBuilder:
+    '''
+    {output}/
+        cache/
+            ipm/                --> incomplete polymorph of each source file
+            icg/                --> incomplete call graph of each source file
+            lmt/                --> last modified time of each source file
+        {result}/
+            logs/
+                ipm/            --> logs during generating 'cache/ipm/'
+                icg/            --> logs during generating 'cache/icg/'
+            pm/                 --> the final polymorph
+            cg/                 --> the final complete call graph
+            overview.txt        --> rough time overview
+            stdout.txt          --> record of standard output
+        compile_commands.json   --> compilation database of target project
+    '''
+
+    class Stat(Process.Stat):
+        cached = 'cached'
+
+    def __init__(self, args):
+        # Read compilation database
+        self.cdb = args.cdb.resolve()
+        self.libcxx = {}
+        self.cdb_list = self.get_cdb_list()
+        # Read args from command
+        self.system = not args.no_system
+        self.expand = not args.no_expand
+        self.strict = not args.no_strict
+        self.output = args.output
+        self.output = Path(self.output).resolve()
+        self.jobs = args.jobs
+        self.clang_cg = args.clang
+        self.clang_cg = Path(shutil.which(
+            self.clang_cg, mode=os.X_OK)).resolve()
+        self.timeout = args.timeout
+        self.call_graph = {}
+        self.polymorph = {}
+
+    def check_libcxx(self, entry, file):
+        key = 'command' if 'command' in entry else 'arguments'
+        self.libcxx[file] = '-stdlib=libc++' in entry[key]
+
+    def get_cdb_list(self):
+        cdb_list = set()
+        self.unique_cdb = []
+        cdb = json.loads(self.cdb.read_bytes())
+        for entry in cdb:
+            file = Path(entry["file"])
+            if not file.is_absolute():
+                directory = Path(entry["directory"])
+                file = directory / file
+            file = file.resolve()
+            if file not in cdb_list:
+                self.check_libcxx(entry, file)
+                cdb_list.add(file)
+                self.unique_cdb.append(entry)
+        return cdb_list
+
+    def get_cache(self, file, tag):
+        return self.cache / tag / file.parent.relative_to('/') / f'{file.name}.json'
+
+    def clear_cache(self, file):
+        self.get_cache(file, 'ipm').unlink(missing_ok=True)
+        self.get_cache(file, 'icg').unlink(missing_ok=True)
+
+    def log_print(self, msg):
+        print(msg)
+        self.stdout_text.write(msg)
+        self.stdout_text.write('\n')
+
+    @staticmethod
+    def load_json_file(file):
+        content = file.read_bytes()
+        try:
+            return json.loads(content)
+        except json.decoder.JSONDecodeError:
+            return json.loads(content.replace(b'\\', b''))
+
+    def prepare(self):
+        self.stdout_text = StringIO()
+        # Prepare clang-polymorph
+        self.clang_pm = self.clang_cg.parent / 'clang-polymorph'
+        self.log_print(f'Using "{self.clang_cg}"')
+        # Track & record overview
+        self.tracker = Tracker()
+        # Create file & directory paths
+        self.result = self.output / \
+            time.strftime("%Y%m%d-%H%M%S", self.tracker.time)
+        self.result.mkdir(parents=True, exist_ok=True)
+        self.cache = self.output / 'cache'
+        self.logs = self.result / 'logs'
+        self.pm = self.result / 'pm'
+        self.cg = self.result / 'cg'
+        self.overview = self.result / 'overview.txt'
+        self.stdout = self.result / 'stdout.txt'
+        # Copy "compile_commands.json"
+        cdb = self.result / 'compile_commands.json'
+        if not cdb.exists() or not cdb.samefile(self.cdb):
+            cdb.write_text(json.dumps(self.unique_cdb, indent=4))
+        # Check last modified time
+        for src in self.cdb_list:
+            src_lmt = str(src.stat().st_mtime)
+            lmt_file = self.get_cache(src, 'lmt')
+            if not lmt_file.exists() or lmt_file.read_text() != src_lmt:
+                # Source file changed, clear cache
+                lmt_file.parent.mkdir(parents=True, exist_ok=True)
+                lmt_file.write_text(src_lmt)
+                self.clear_cache(src)
+
+    def generate_log_file(self, input, tag, log_msg):
+        log_file = self.logs / tag / \
+            input.parent.relative_to('/') / f'{input.name}.log'
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_time = time.strftime("%Y-%m-%d %H:%M:%S", self.tracker.time)
+        log_file.write_text(f'{log_time}\n\n{log_msg}')
+
+    def run_jobs(self, job, tag, input_list):
+        self.tracker.track(tag, len(input_list))
+        start_time = time.time()
+        with ThreadPoolExecutor(self.jobs) as e:
+            futures = [e.submit(job, input) for input in input_list]
+            for i, f in enumerate(as_completed(futures), start=1):
+                (stat, input) = f.result()
+                progress = f'[{tag}] [{i}/{len(input_list)}] "{input}"'
+                if stat == CGBuilder.Stat.timeout:
+                    self.tracker.increase('timeout', 1)
+                    progress += ' [TIMEOUT]'
+                elif stat == CGBuilder.Stat.unknown:
+                    self.tracker.increase('unknown', 1)
+                    progress += ' [UNKNOWN]'
+                elif stat == CGBuilder.Stat.error:
+                    self.tracker.increase('error', 1)
+                    progress += ' [ERROR]'
+                elif stat == CGBuilder.Stat.terminated:
+                    self.tracker.increase('terminated', 1)
+                    progress += ' [TERMINATED]'
+                elif stat == CGBuilder.Stat.ok:
+                    self.tracker.increase('done', 1)
+                elif stat == CGBuilder.Stat.cached:
+                    self.tracker.increase('cached', 1)
+                    progress += ' [CACHED]'
+                self.log_print(progress)
+                if self.strict and stat != CGBuilder.Stat.ok and stat != CGBuilder.Stat.cached:
+                    print(f'Error detected, see logs for more details')
+                    sys.exit(1)
+        self.tracker.increase('real time', time.time() - start_time)
+
+    def run_cmd(self, cmd, tag, input, output, timeout, on_success=None):
+        start_time = time.time()
+        if output.exists():
+            self.tracker.increase('total time', time.time() - start_time)
+            return CGBuilder.Stat.cached, input
+        output.parent.mkdir(parents=True, exist_ok=True)
+        proc = Process(cmd, timeout)
+        if proc.stat == Process.Stat.ok:
+            if on_success:
+                on_success(proc)
+        else:
+            output.unlink(missing_ok=True)
+            self.generate_log_file(input, tag, proc.dump_log())
+        self.tracker.increase('total time', time.time() - start_time)
+        return proc.stat, input
+
+    def libcxx_options(self):
+        libcxx = self.clang_cg.parent.parent / 'include' / 'c++' / 'v1'
+        opt = ['-extra-arg=-Xclang', '-extra-arg=-isystem',
+               '-extra-arg=-Xclang', f'-extra-arg={libcxx.as_posix()}']
+        return opt
+
+    def generate_ipm(self):
+        def generate_ipm_job(input):
+            ipm_file = self.get_cache(input, 'ipm')
+            cmd = [self.clang_pm, '-p', self.result, input]
+            if self.system:
+                cmd.append('-include-system-header')
+            if self.libcxx[input]:
+                cmd.extend(self.libcxx_options())
+            return self.run_cmd(cmd, 'ipm', input, ipm_file, None,
+                                on_success=lambda p: ipm_file.write_text(p.stdout))
+        self.log_print('Generating incomplete polymorph...')
+        self.run_jobs(generate_ipm_job, 'ipm', self.cdb_list)
+
+    def build_pm(self):
+        self.log_print('Building polymorph...')
+        ipm_dir = self.cache / 'ipm'
+        ipm_list = [f for f in ipm_dir.rglob('*') if f.is_file()]
+        self.tracker.track('build_ipm', len(ipm_list))
+        start_time = time.time()
+        for (i, ipm_file) in enumerate(ipm_list, start=1):
+            ipm = CGBuilder.load_json_file(ipm_file)
+            for class_object in ipm:
+                for method_object in class_object['Method']:
+                    derived_poly_info = PolymorphInfo(method_object)
+                    for override_object in method_object['Override']:
+                        override_name = override_object['Name']
+                        override_poly_info = self.polymorph.get(
+                            override_name, PolymorphInfo(override_object))
+                        override_poly_info.add_derived(derived_poly_info)
+                        self.polymorph[override_name] = override_poly_info
+            self.log_print(f'[build_ipm] [{i}/{len(ipm_list)}] "{ipm_file}"')
+        self.tracker.increase('real time', time.time() - start_time)
+        self.tracker.increase('done', len(ipm_list))
+
+    def dump_pm(self):
+        self.log_print('Dumping complete polymorph...')
+        self.tracker.track('dump_pm', len(self.polymorph))
+        start_time = time.time()
+        MAX_PER_FILE = 1000
+        self.pm.mkdir(parents=True, exist_ok=True)
+        file_no = 0
+        sub_pm = []
+        count = 0
+        for (i, poly_info) in enumerate(self.polymorph.values(), start=1):
+            sub_pm.append(poly_info)
+            if i == len(self.polymorph) or len(sub_pm) == MAX_PER_FILE:
+                file_no += 1
+                pm_file = self.pm / f'pm-{file_no}.json'
+                pm_file.write_text(json.dumps(
+                    sub_pm, indent=4, cls=PolymorphInfoEncoder))
+                count += len(sub_pm)
+                sub_pm.clear()
+                self.log_print(
+                    f'[dump_pm] [{count}/{len(self.polymorph)}] "{pm_file}"')
+        self.tracker.increase('real time', time.time() - start_time)
+        self.tracker.increase('done', len(self.polymorph))
+
+    def generate_icg(self):
+        def generate_icg_job(input):
+            icg_file = self.get_cache(input, 'icg')
+            cmd = [self.clang_cg, '-p', self.result, input]
+            if self.system:
+                cmd.append('-include-system-header')
+            if self.libcxx[input]:
+                cmd.extend(self.libcxx_options())
+            return self.run_cmd(cmd, 'icg', input, icg_file, None,
+                                on_success=lambda p: icg_file.write_text(p.stdout))
+        self.log_print('Generating incomplete call graphs...')
+        self.run_jobs(generate_icg_job, 'icg', self.cdb_list)
+
+    def get_all_derived_methods(self, method):
+        result = {}
+        queue = []
+        if method in self.polymorph:
+            queue.extend(self.polymorph[method].Derived)
+        while queue:
+            derived = queue.pop()
+            derived_name = derived['Name']
+            if derived_name in result:
+                continue
+            result[derived_name] = derived
+            if derived_name in self.polymorph:
+                queue.extend(self.polymorph[derived_name].Derived)
+        return result
+
+    def expand_derived_methods(self, function_info):
+        expanded_call_sites = []
+        for call_site in function_info.CallSite:
+            expanded_call_sites.append(call_site)
+            derived_methods = self.get_all_derived_methods(call_site.USR)
+            for derived_method in derived_methods.values():
+                expanded_call_site = copy.copy(call_site)
+                expanded_call_site.USR = derived_method['Name']
+                expanded_call_site.SName = derived_method['SName']
+                expanded_call_site.Expand = call_site.USR
+                expanded_call_sites.append(expanded_call_site)
+        function_info.CallSite = expanded_call_sites
+
+    def populate_icg(self):
+        self.log_print('Populating incomplete call graphs...')
+        icg_dir = self.cache / 'icg'
+        icg_list = [f for f in icg_dir.rglob('*') if f.is_file()]
+        self.tracker.track('pop_icg', len(icg_list))
+        start_time = time.time()
+        for (i, icg_file) in enumerate(icg_list, start=1):
+            icg = CGBuilder.load_json_file(icg_file)
+            for obj in icg:
+                function_info = FunctionInfo(obj)
+                if self.expand:
+                    self.expand_derived_methods(function_info)
+                self.call_graph[function_info.USR] = function_info
+            self.log_print(f'[pop_icg] [{i}/{len(icg_list)}] "{icg_file}"')
+        self.tracker.increase('real time', time.time() - start_time)
+        self.tracker.increase('done', len(icg_list))
+
+    def build_cg(self):
+        self.log_print('Building complete call graph...')
+        self.tracker.track('build_cg', len(self.call_graph))
+        start_time = time.time()
+        for (i, caller) in enumerate(self.call_graph.values(), start=1):
+            for call in caller.CallSite:
+                if call.USR not in self.call_graph:
+                    continue
+                callee = self.call_graph[call.USR]
+                callee.Caller.add(caller.USR)
+            self.log_print(
+                f'[build_cg] [{i}/{len(self.call_graph)}] "{caller.USR}"')
+        self.tracker.increase('real time', time.time() - start_time)
+        self.tracker.increase('done', len(self.call_graph))
+
+    @staticmethod
+    def catch(throw, catch):
+        real_throw = set()
+        for throw_ex in throw:
+            caught = False
+            for catch_ex in catch:
+                if catch_ex.USR == '...' or catch_ex == throw_ex:
+                    caught = True
+                    break
+                for parent in throw_ex.Parent:
+                    if catch_ex.USR == parent:
+                        caught = True
+                        break
+            if not caught:
+                real_throw.add(throw_ex)
+        return real_throw
+
+    def propagate_ex(self):
+        self.log_print('Propagating exception...')
+        self.tracker.track('prop_ex', len(self.call_graph))
+        start_time = time.time()
+        # Collect starting functions
+        function_queue = []
+        for function in self.call_graph.values():
+            if function.Throw:
+                function_queue.append(function)
+        # Iterate queue
+        visited = {}
+        while function_queue:
+            callee = function_queue.pop()
+            if callee.USR in visited:
+                previous_throw = visited[callee.USR]
+                if callee.Throw == previous_throw:
+                    # Callee is already visited before
+                    # There is no need to visit it again
+                    continue
+            visited[callee.USR] = set(callee.Throw)
+            for caller_USR in callee.Caller:
+                caller = self.call_graph[caller_USR]
+                # Find callee's exceptions that are not caught
+                real_callee_throw = set()
+                for call_site in caller.CallSite:
+                    if call_site.USR != callee.USR:
+                        continue
+                    call_site_throw = CGBuilder.catch(
+                        callee.Throw, call_site.Catch)
+                    real_callee_throw.update(call_site_throw)
+                if caller.Throw >= real_callee_throw:
+                    # There are two cases when caller's throw >= real callee's throw:
+                    # 1. Caller's initial throw >= callee's throw
+                    #   In this case, caller was pushed into queue at starting
+                    # 2. Caller's previously updated throw >= real callee's throw
+                    #   In this case, caller.throw.update statement was executed,
+                    #   and caller was pushed into queue before
+                    # In both cases, there is no need to push caller into queue
+                    continue
+                caller.Throw.update(real_callee_throw)
+                function_queue.append(caller)
+        # Update throw exceptions from expanded call sites
+        for function in self.call_graph.values():
+            for call_site in function.CallSite:
+                if call_site.Expand not in self.call_graph:
+                    continue
+                if call_site.USR not in self.call_graph:
+                    continue
+                expanded = self.call_graph[call_site.USR]
+                origin = self.call_graph[call_site.Expand]
+                origin.Throw.update(expanded.Throw)
+        self.tracker.increase('real time', time.time() - start_time)
+        self.tracker.increase('done', len(self.call_graph))
+
+    def dump_cg(self):
+        self.log_print('Dumping complete call graph...')
+        self.tracker.track('dump_cg', len(self.call_graph))
+        start_time = time.time()
+        MAX_PER_FILE = 1000
+        self.cg.mkdir(parents=True, exist_ok=True)
+        file_no = 0
+        sub_cg = []
+        count = 0
+        for (i, fun) in enumerate(self.call_graph.values(), start=1):
+            sub_cg.append(fun)
+            if i == len(self.call_graph) or len(sub_cg) == MAX_PER_FILE:
+                file_no += 1
+                cg_file = self.cg / f'cg-{file_no}.json'
+                cg_file.write_text(json.dumps(
+                    sub_cg, indent=4, cls=FunctionInfoEncoder))
+                count += len(sub_cg)
+                sub_cg.clear()
+                self.log_print(
+                    f'[dump_cg] [{count}/{len(self.call_graph)}] "{cg_file}"')
+        self.tracker.increase('real time', time.time() - start_time)
+        self.tracker.increase('done', len(self.call_graph.values()))
+
+    def generate_overview(self, interrupted):
+        overview = time.strftime("%Y-%m-%d %H:%M:%S", self.tracker.time)
+        overview += ' (Interrupted)\n' if interrupted else ' (Complete)\n'
+        for tag in self.tracker.data.keys():
+            overview += f'{tag}:\n'
+            for key in self.tracker.data[tag].keys():
+                value = self.tracker.data[tag][key]
+                if isinstance(value, float):
+                    value = format(value, '.3f')
+                overview += f'  {key}: {value}\n'
+        self.overview.write_text(overview)
+
+    def cleanup(self):
+        # Write stdout record
+        self.stdout.write_text(self.stdout_text.getvalue())
+
+    def build(self):
+        try:
+            self.prepare()
+            if self.expand:
+                self.generate_ipm()
+                self.build_pm()
+                self.dump_pm()
+            self.generate_icg()
+            self.populate_icg()
+            self.build_cg()
+            self.propagate_ex()
+            self.dump_cg()
+        except KeyboardInterrupt:
+            self.generate_overview(True)
+        else:
+            self.generate_overview(False)
+        finally:
+            self.cleanup()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    builder = CGBuilder(args)
+    builder.build()

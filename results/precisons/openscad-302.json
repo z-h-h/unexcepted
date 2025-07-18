@@ -1,0 +1,107 @@
+{
+    "Graph": "/home/gk/repos/5k-10k/openscad-copies/302/call-graph/20250518-171853/cg",
+    "Result": [
+        {
+            "Context": 1,
+            "Thrown": 363,
+            "Caught": 262,
+            "Rate": "0.72"
+        },
+        {
+            "Context": 3,
+            "Thrown": 424,
+            "Caught": 340,
+            "Rate": "0.80"
+        },
+        {
+            "Context": 5,
+            "Thrown": 516,
+            "Caught": 405,
+            "Rate": "0.78"
+        },
+        {
+            "Context": 7,
+            "Thrown": 673,
+            "Caught": 493,
+            "Rate": "0.73"
+        },
+        {
+            "Context": 9,
+            "Thrown": 1685,
+            "Caught": 558,
+            "Rate": "0.33"
+        },
+        {
+            "Context": 11,
+            "Thrown": 519,
+            "Caught": 355,
+            "Rate": "0.68"
+        },
+        {
+            "Context": 13,
+            "Thrown": 723,
+            "Caught": 417,
+            "Rate": "0.58"
+        },
+        {
+            "Context": 15,
+            "Thrown": 919,
+            "Caught": 502,
+            "Rate": "0.55"
+        },
+        {
+            "Context": 17,
+            "Thrown": 13533,
+            "Caught": 558,
+            "Rate": "0.04"
+        },
+        {
+            "Context": 19,
+            "Thrown": 642,
+            "Caught": 406,
+            "Rate": "0.63"
+        },
+        {
+            "Context": 21,
+            "Thrown": 789,
+            "Caught": 474,
+            "Rate": "0.60"
+        },
+        {
+            "Context": 23,
+            "Thrown": 1497,
+            "Caught": 536,
+            "Rate": "0.36"
+        },
+        {
+            "Context": 25,
+            "Thrown": 3327,
+            "Caught": 570,
+            "Rate": "0.17"
+        },
+        {
+            "Context": 27,
+            "Thrown": 1395,
+            "Caught": 458,
+            "Rate": "0.33"
+        },
+        {
+            "Context": 29,
+            "Thrown": 2096,
+            "Caught": 497,
+            "Rate": "0.24"
+        },
+        {
+            "Context": 31,
+            "Thrown": 3190,
+            "Caught": 561,
+            "Rate": "0.18"
+        },
+        {
+            "Context": 33,
+            "Thrown": 22563,
+            "Caught": 572,
+            "Rate": "0.03"
+        }
+    ]
+}

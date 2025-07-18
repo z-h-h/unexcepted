@@ -1,0 +1,107 @@
+{
+    "Graph": "/home/gk/repos/5k-10k/stellarium-copies/300/call-graph/20250518-172951/cg",
+    "Result": [
+        {
+            "Context": 1,
+            "Thrown": 0,
+            "Caught": 0,
+            "Rate": "-"
+        },
+        {
+            "Context": 3,
+            "Thrown": 18,
+            "Caught": 16,
+            "Rate": "0.89"
+        },
+        {
+            "Context": 5,
+            "Thrown": 27,
+            "Caught": 25,
+            "Rate": "0.93"
+        },
+        {
+            "Context": 7,
+            "Thrown": 27,
+            "Caught": 23,
+            "Rate": "0.85"
+        },
+        {
+            "Context": 9,
+            "Thrown": 56,
+            "Caught": 35,
+            "Rate": "0.62"
+        },
+        {
+            "Context": 11,
+            "Thrown": 33,
+            "Caught": 29,
+            "Rate": "0.88"
+        },
+        {
+            "Context": 13,
+            "Thrown": 42,
+            "Caught": 38,
+            "Rate": "0.90"
+        },
+        {
+            "Context": 15,
+            "Thrown": 42,
+            "Caught": 36,
+            "Rate": "0.86"
+        },
+        {
+            "Context": 17,
+            "Thrown": 78,
+            "Caught": 49,
+            "Rate": "0.63"
+        },
+        {
+            "Context": 19,
+            "Thrown": 57,
+            "Caught": 26,
+            "Rate": "0.46"
+        },
+        {
+            "Context": 21,
+            "Thrown": 63,
+            "Caught": 26,
+            "Rate": "0.41"
+        },
+        {
+            "Context": 23,
+            "Thrown": 77,
+            "Caught": 33,
+            "Rate": "0.43"
+        },
+        {
+            "Context": 25,
+            "Thrown": 465,
+            "Caught": 47,
+            "Rate": "0.10"
+        },
+        {
+            "Context": 27,
+            "Thrown": 103,
+            "Caught": 46,
+            "Rate": "0.45"
+        },
+        {
+            "Context": 29,
+            "Thrown": 104,
+            "Caught": 46,
+            "Rate": "0.44"
+        },
+        {
+            "Context": 31,
+            "Thrown": 546,
+            "Caught": 52,
+            "Rate": "0.10"
+        },
+        {
+            "Context": 33,
+            "Thrown": 19277,
+            "Caught": 54,
+            "Rate": "0.00"
+        }
+    ]
+}
